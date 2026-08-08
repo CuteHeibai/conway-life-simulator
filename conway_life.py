@@ -11,6 +11,8 @@ DEFAULT_CELL_SIZE = 18
 BASE_TICK_MS = 250
 DEFAULT_SPEED_MULTIPLIER = 1
 CYCLE_DETECTION_CELL_LIMIT = 20000
+MAX_VISIBLE_DRAW_ITEMS = 12000
+MAX_POPULATION_HISTORY = 5000
 MAX_RANDOM_COLUMNS = 120
 MAX_RANDOM_ROWS = 80
 RANDOM_DENSITY = 0.18
@@ -62,6 +64,11 @@ class LifeApp:
         self.view_start = None
         self.seen_states = {}
         self.cycle_detection_paused = False
+        self.render_limited = False
+        self.population_history = []
+        self.stats_window = None
+        self.stats_canvas = None
+        self.stats_text = tk.StringVar()
 
         self.speed_multiplier = tk.IntVar(value=DEFAULT_SPEED_MULTIPLIER)
         self.status_text = tk.StringVar()
@@ -91,17 +98,18 @@ class LifeApp:
         tk.Button(toolbar, text="保存", width=8, command=self.save_pattern).grid(row=0, column=5, padx=6)
         tk.Button(toolbar, text="载入", width=8, command=self.load_pattern).grid(row=0, column=6, padx=6)
         tk.Button(toolbar, text="规则", width=8, command=self.show_rules).grid(row=0, column=7, padx=6)
+        tk.Button(toolbar, text="统计", width=8, command=self.show_statistics).grid(row=0, column=8, padx=6)
 
-        tk.Label(toolbar, text="倍速", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=8, padx=(18, 4))
+        tk.Label(toolbar, text="倍速", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=9, padx=(18, 4))
         multiplier = tk.Spinbox(toolbar, from_=1, to=200, width=6, textvariable=self.speed_multiplier)
-        multiplier.grid(row=0, column=9, padx=4)
+        multiplier.grid(row=0, column=10, padx=4)
 
         tk.Label(
             toolbar,
             text="左键拖动画布，右键填充/擦除，滚轮缩放",
             bg=PANEL_BG,
             fg="#555",
-        ).grid(row=0, column=10, padx=(18, 0), sticky="w")
+        ).grid(row=0, column=11, padx=(18, 0), sticky="w")
 
         self.canvas = tk.Canvas(self.root, bg=BACKGROUND, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -137,8 +145,36 @@ class LifeApp:
         messagebox.showinfo("生命游戏规则", RULES_TEXT)
 
     def reset_history(self):
-        self.seen_states = {frozenset(self.alive): self.generation}
+        if len(self.alive) > CYCLE_DETECTION_CELL_LIMIT:
+            self.seen_states = {}
+            self.cycle_detection_paused = True
+            self.record_population()
+            return
+
+        shape, anchor = self.normalized_shape()
+        self.seen_states = {shape: (self.generation, anchor)}
         self.cycle_detection_paused = False
+        self.record_population()
+
+    def normalized_shape(self):
+        if not self.alive:
+            return frozenset(), (0, 0)
+
+        min_x = min(cell_x for cell_x, _ in self.alive)
+        min_y = min(cell_y for _, cell_y in self.alive)
+        shape = frozenset((cell_x - min_x, cell_y - min_y) for cell_x, cell_y in self.alive)
+        return shape, (min_x, min_y)
+
+    def record_population(self):
+        point = (self.generation, len(self.alive))
+        if self.population_history and self.population_history[-1][0] == self.generation:
+            self.population_history[-1] = point
+        else:
+            self.population_history.append(point)
+
+        if len(self.population_history) > MAX_POPULATION_HISTORY:
+            self.population_history = self.population_history[-MAX_POPULATION_HISTORY:]
+        self.redraw_statistics()
 
     def screen_to_cell(self, x, y):
         cell_x = int((x - self.offset_x) // self.cell_size)
@@ -266,6 +302,7 @@ class LifeApp:
             if count == 3 or (count == 2 and cell in alive)
         }
         self.generation += 1
+        self.record_population()
         return self.detect_cycle()
 
     def detect_cycle(self):
@@ -273,23 +310,32 @@ class LifeApp:
             self.cycle_detection_paused = True
             return None
 
-        state = frozenset(self.alive)
-        first_seen = self.seen_states.get(state)
+        shape, anchor = self.normalized_shape()
+        first_seen = self.seen_states.get(shape)
         if first_seen is not None:
-            return first_seen, self.generation - first_seen
+            first_generation, first_anchor = first_seen
+            movement_x = anchor[0] - first_anchor[0]
+            movement_y = anchor[1] - first_anchor[1]
+            return first_generation, self.generation - first_generation, movement_x, movement_y
 
         self.cycle_detection_paused = False
-        self.seen_states[state] = self.generation
+        self.seen_states[shape] = (self.generation, anchor)
         return None
 
     def handle_cycle(self, cycle):
         if cycle is None:
             return False
 
-        first_seen, period = cycle
+        first_seen, period, movement_x, movement_y = cycle
         self.running = False
         self.run_button.configure(text="开始")
-        message = f"检测到循环：第 {self.generation} 代重复了第 {first_seen} 代，周期为 {period}。程序已暂停。"
+        if movement_x or movement_y:
+            message = (
+                f"检测到平移循环：第 {self.generation} 代与第 {first_seen} 代形状相同，"
+                f"周期为 {period}，每周期平移 ({movement_x}, {movement_y})。程序已暂停。"
+            )
+        else:
+            message = f"检测到循环：第 {self.generation} 代重复了第 {first_seen} 代，周期为 {period}。程序已暂停。"
         self.status_text.set(message)
         messagebox.showinfo("检测到循环", message)
         return True
@@ -390,12 +436,25 @@ class LifeApp:
     def draw_cells(self):
         left, top, right, bottom = self.visible_bounds()
         pad = 1 if self.cell_size > 8 else 0
+        visible_cells = [
+            (cell_x, cell_y)
+            for cell_x, cell_y in self.alive
+            if left <= cell_x <= right and top <= cell_y <= bottom
+        ]
+
+        if len(visible_cells) > MAX_VISIBLE_DRAW_ITEMS:
+            self.render_limited = True
+            stride = (len(visible_cells) + MAX_VISIBLE_DRAW_ITEMS - 1) // MAX_VISIBLE_DRAW_ITEMS
+            for cell_x, cell_y in visible_cells[::stride]:
+                self.draw_cell(cell_x, cell_y, pad)
+            return
+
+        self.render_limited = False
 
         if self.cell_size <= 2:
             rows = defaultdict(list)
-            for cell_x, cell_y in self.alive:
-                if left <= cell_x <= right and top <= cell_y <= bottom:
-                    rows[cell_y].append(cell_x)
+            for cell_x, cell_y in visible_cells:
+                rows[cell_y].append(cell_x)
 
             for cell_y, row_cells in rows.items():
                 row_cells.sort()
@@ -411,19 +470,20 @@ class LifeApp:
                 self.draw_small_cell_segment(segment_start, previous, cell_y)
             return
 
-        for cell_x, cell_y in self.alive:
-            if not (left <= cell_x <= right and top <= cell_y <= bottom):
-                continue
-            x, y = self.cell_to_screen(cell_x, cell_y)
-            self.canvas.create_rectangle(
-                x + pad,
-                y + pad,
-                x + self.cell_size - pad,
-                y + self.cell_size - pad,
-                fill=LIVE_COLOR,
-                outline=LIVE_OUTLINE if self.cell_size >= 10 else LIVE_COLOR,
-                tags="cells",
-            )
+        for cell_x, cell_y in visible_cells:
+            self.draw_cell(cell_x, cell_y, pad)
+
+    def draw_cell(self, cell_x, cell_y, pad):
+        x, y = self.cell_to_screen(cell_x, cell_y)
+        self.canvas.create_rectangle(
+            x + pad,
+            y + pad,
+            x + self.cell_size - pad,
+            y + self.cell_size - pad,
+            fill=LIVE_COLOR,
+            outline=LIVE_OUTLINE if self.cell_size >= 10 else LIVE_COLOR,
+            tags="cells",
+        )
 
     def draw_small_cell_segment(self, start_x, end_x, cell_y):
         x1, y1 = self.cell_to_screen(start_x, cell_y)
@@ -432,10 +492,73 @@ class LifeApp:
 
     def update_status(self):
         cycle_text = "    循环检测：暂停（活细胞过多）" if self.cycle_detection_paused else ""
+        render_text = "    显示：采样" if self.render_limited else ""
         self.status_text.set(
             f"第 {self.generation} 代    活细胞：{len(self.alive)}    "
-            f"缩放：{self.cell_size}px/格    倍速：{self.get_speed_multiplier()}x{cycle_text}"
+            f"缩放：{self.cell_size}px/格    倍速：{self.get_speed_multiplier()}x{cycle_text}{render_text}"
         )
+
+    def show_statistics(self):
+        if self.stats_window and self.stats_window.winfo_exists():
+            self.stats_window.lift()
+            self.redraw_statistics()
+            return
+
+        self.stats_window = tk.Toplevel(self.root)
+        self.stats_window.title("活细胞趋势统计")
+        self.stats_window.geometry("620x360")
+        self.stats_window.minsize(420, 260)
+
+        tk.Label(self.stats_window, textvariable=self.stats_text, anchor="w", padx=10, pady=6).pack(fill="x")
+        self.stats_canvas = tk.Canvas(self.stats_window, bg="#ffffff", highlightthickness=0)
+        self.stats_canvas.pack(fill="both", expand=True)
+        self.stats_canvas.bind("<Configure>", lambda event: self.redraw_statistics())
+        self.redraw_statistics()
+
+    def redraw_statistics(self):
+        if not self.stats_canvas or not self.stats_canvas.winfo_exists():
+            return
+
+        history = self.population_history[-800:]
+        canvas = self.stats_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        padding = 38
+
+        if not history:
+            self.stats_text.set("暂无数据")
+            return
+
+        counts = [count for _, count in history]
+        min_count = min(counts)
+        max_count = max(counts)
+        current_generation, current_count = history[-1]
+        self.stats_text.set(
+            f"当前第 {current_generation} 代，活细胞 {current_count}；"
+            f"窗口内最小 {min_count}，最大 {max_count}"
+        )
+
+        canvas.create_line(padding, height - padding, width - padding, height - padding, fill="#999")
+        canvas.create_line(padding, padding, padding, height - padding, fill="#999")
+
+        if len(history) == 1:
+            x = width // 2
+            y = height // 2
+            canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=LIVE_COLOR, outline=LIVE_COLOR)
+            return
+
+        span = max(1, max_count - min_count)
+        x_step = (width - padding * 2) / (len(history) - 1)
+        points = []
+        for index, (_, count) in enumerate(history):
+            x = padding + index * x_step
+            y = height - padding - ((count - min_count) / span) * (height - padding * 2)
+            points.extend((x, y))
+
+        canvas.create_line(*points, fill=LIVE_COLOR, width=2, smooth=True)
+        canvas.create_text(padding, padding - 18, anchor="w", text=f"max {max_count}", fill="#555")
+        canvas.create_text(padding, height - padding + 18, anchor="w", text=f"min {min_count}", fill="#555")
 
 
 def main():
