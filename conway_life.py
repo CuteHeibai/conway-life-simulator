@@ -10,6 +10,7 @@ MAX_CELL_SIZE = 80
 DEFAULT_CELL_SIZE = 18
 BASE_TICK_MS = 250
 DEFAULT_SPEED_MULTIPLIER = 1
+CYCLE_DETECTION_CELL_LIMIT = 20000
 GRID_COLOR = "#d8dee9"
 LIVE_COLOR = "#1f7a4d"
 LIVE_OUTLINE = "#0f5132"
@@ -57,6 +58,7 @@ class LifeApp:
         self.pan_start = None
         self.view_start = None
         self.seen_states = {}
+        self.cycle_detection_paused = False
 
         self.speed_multiplier = tk.IntVar(value=DEFAULT_SPEED_MULTIPLIER)
         self.status_text = tk.StringVar()
@@ -120,7 +122,7 @@ class LifeApp:
     def center_view(self):
         self.offset_x = self.canvas.winfo_width() // 2
         self.offset_y = self.canvas.winfo_height() // 2
-        self.redraw()
+        self.redraw(full=True)
 
     def seed_glider(self):
         self.alive = {(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)}
@@ -132,6 +134,7 @@ class LifeApp:
 
     def reset_history(self):
         self.seen_states = {frozenset(self.alive): self.generation}
+        self.cycle_detection_paused = False
 
     def screen_to_cell(self, x, y):
         cell_x = int((x - self.offset_x) // self.cell_size)
@@ -174,7 +177,7 @@ class LifeApp:
         else:
             self.alive.discard(cell)
         self.reset_history()
-        self.redraw()
+        self.redraw(full=False)
 
     def start_pan(self, event):
         self.pan_start = (event.x, event.y)
@@ -185,7 +188,7 @@ class LifeApp:
             return
         self.offset_x = self.view_start[0] + event.x - self.pan_start[0]
         self.offset_y = self.view_start[1] + event.y - self.pan_start[1]
-        self.redraw()
+        self.redraw(full=True)
 
     def zoom_with_wheel(self, event):
         factor = 1.15 if event.delta > 0 else 1 / 1.15
@@ -196,7 +199,11 @@ class LifeApp:
 
     def zoom_at(self, screen_x, screen_y, factor):
         old_size = self.cell_size
-        new_size = max(MIN_CELL_SIZE, min(MAX_CELL_SIZE, round(old_size * factor)))
+        if factor > 1:
+            new_size = max(old_size + 1, round(old_size * factor))
+        else:
+            new_size = min(old_size - 1, round(old_size * factor))
+        new_size = max(MIN_CELL_SIZE, min(MAX_CELL_SIZE, new_size))
         if new_size == old_size:
             return
 
@@ -205,7 +212,7 @@ class LifeApp:
         self.cell_size = new_size
         self.offset_x = int(screen_x - world_x * new_size)
         self.offset_y = int(screen_y - world_y * new_size)
-        self.redraw()
+        self.redraw(full=True)
 
     def toggle_running(self):
         self.running = not self.running
@@ -218,39 +225,52 @@ class LifeApp:
             return
 
         cycle = self.advance_generation()
-        self.redraw()
+        self.redraw(full=False)
         if self.handle_cycle(cycle):
             return
 
-        delay = max(1, BASE_TICK_MS // max(1, self.speed_multiplier.get()))
+        delay = max(1, BASE_TICK_MS // self.get_speed_multiplier())
         self.root.after(delay, self.run_loop)
 
     def step_once(self):
         cycle = self.advance_generation()
-        self.redraw()
+        self.redraw(full=False)
         self.handle_cycle(cycle)
 
-    def advance_generation(self):
-        neighbor_counts = defaultdict(int)
+    def get_speed_multiplier(self):
+        try:
+            return max(1, min(500, int(self.speed_multiplier.get())))
+        except tk.TclError:
+            return DEFAULT_SPEED_MULTIPLIER
 
-        for cell_x, cell_y in self.alive:
+    def advance_generation(self):
+        alive = self.alive
+        neighbor_counts = {}
+
+        for cell_x, cell_y in alive:
             for dx, dy in NEIGHBOR_OFFSETS:
-                neighbor_counts[(cell_x + dx, cell_y + dy)] += 1
+                neighbor = (cell_x + dx, cell_y + dy)
+                neighbor_counts[neighbor] = neighbor_counts.get(neighbor, 0) + 1
 
         self.alive = {
             cell
             for cell, count in neighbor_counts.items()
-            if count == 3 or (count == 2 and cell in self.alive)
+            if count == 3 or (count == 2 and cell in alive)
         }
         self.generation += 1
         return self.detect_cycle()
 
     def detect_cycle(self):
+        if len(self.alive) > CYCLE_DETECTION_CELL_LIMIT:
+            self.cycle_detection_paused = True
+            return None
+
         state = frozenset(self.alive)
         first_seen = self.seen_states.get(state)
         if first_seen is not None:
             return first_seen, self.generation - first_seen
 
+        self.cycle_detection_paused = False
         self.seen_states[state] = self.generation
         return None
 
@@ -272,7 +292,7 @@ class LifeApp:
         self.alive.clear()
         self.generation = 0
         self.reset_history()
-        self.redraw()
+        self.redraw(full=False)
 
     def randomize_visible(self):
         left, top, right, bottom = self.visible_bounds()
@@ -283,7 +303,7 @@ class LifeApp:
                     self.alive.add((cell_x, cell_y))
         self.generation = 0
         self.reset_history()
-        self.redraw()
+        self.redraw(full=False)
 
     def save_pattern(self):
         path = filedialog.asksaveasfilename(
@@ -325,11 +345,14 @@ class LifeApp:
         self.alive = loaded
         self.generation = 0
         self.reset_history()
-        self.redraw()
+        self.redraw(full=False)
 
-    def redraw(self):
-        self.canvas.delete("all")
-        self.draw_grid()
+    def redraw(self, full=True):
+        if full:
+            self.canvas.delete("all")
+            self.draw_grid()
+        else:
+            self.canvas.delete("cells")
         self.draw_cells()
         self.update_status()
 
@@ -343,13 +366,33 @@ class LifeApp:
         start_y = self.offset_y % self.cell_size
 
         for x in range(start_x, width, self.cell_size):
-            self.canvas.create_line(x, 0, x, height, fill=GRID_COLOR)
+            self.canvas.create_line(x, 0, x, height, fill=GRID_COLOR, tags="grid")
         for y in range(start_y, height, self.cell_size):
-            self.canvas.create_line(0, y, width, y, fill=GRID_COLOR)
+            self.canvas.create_line(0, y, width, y, fill=GRID_COLOR, tags="grid")
 
     def draw_cells(self):
         left, top, right, bottom = self.visible_bounds()
         pad = 1 if self.cell_size > 8 else 0
+
+        if self.cell_size <= 2:
+            rows = defaultdict(list)
+            for cell_x, cell_y in self.alive:
+                if left <= cell_x <= right and top <= cell_y <= bottom:
+                    rows[cell_y].append(cell_x)
+
+            for cell_y, row_cells in rows.items():
+                row_cells.sort()
+                segment_start = row_cells[0]
+                previous = row_cells[0]
+                for cell_x in row_cells[1:]:
+                    if cell_x == previous + 1:
+                        previous = cell_x
+                        continue
+                    self.draw_small_cell_segment(segment_start, previous, cell_y)
+                    segment_start = cell_x
+                    previous = cell_x
+                self.draw_small_cell_segment(segment_start, previous, cell_y)
+            return
 
         for cell_x, cell_y in self.alive:
             if not (left <= cell_x <= right and top <= cell_y <= bottom):
@@ -362,12 +405,19 @@ class LifeApp:
                 y + self.cell_size - pad,
                 fill=LIVE_COLOR,
                 outline=LIVE_OUTLINE if self.cell_size >= 10 else LIVE_COLOR,
+                tags="cells",
             )
 
+    def draw_small_cell_segment(self, start_x, end_x, cell_y):
+        x1, y1 = self.cell_to_screen(start_x, cell_y)
+        x2, y2 = self.cell_to_screen(end_x + 1, cell_y)
+        self.canvas.create_rectangle(x1, y1, x2, y2 + self.cell_size, fill=LIVE_COLOR, outline=LIVE_COLOR, tags="cells")
+
     def update_status(self):
+        cycle_text = "    循环检测：暂停（活细胞过多）" if self.cycle_detection_paused else ""
         self.status_text.set(
             f"第 {self.generation} 代    活细胞：{len(self.alive)}    "
-            f"缩放：{self.cell_size}px/格    倍速：{self.speed_multiplier.get()}x"
+            f"缩放：{self.cell_size}px/格    倍速：{self.get_speed_multiplier()}x{cycle_text}"
         )
 
 
