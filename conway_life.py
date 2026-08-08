@@ -5,17 +5,26 @@ from tkinter import filedialog, messagebox
 
 
 APP_TITLE = "Conway Life Simulator"
-MIN_CELL_SIZE = 4
+MIN_CELL_SIZE = 1
 MAX_CELL_SIZE = 80
 DEFAULT_CELL_SIZE = 18
-DEFAULT_TICK_MS = 80
-DEFAULT_GENERATIONS_PER_TICK = 1
+BASE_TICK_MS = 250
+DEFAULT_SPEED_MULTIPLIER = 1
 GRID_COLOR = "#d8dee9"
 LIVE_COLOR = "#1f7a4d"
 LIVE_OUTLINE = "#0f5132"
 BACKGROUND = "#f7f5ee"
 PANEL_BG = "#ece7db"
 TEXT_COLOR = "#202124"
+RULES_TEXT = (
+    "康威生命游戏规则：\n\n"
+    "1. 每个格子只有两种状态：活细胞或空格。\n"
+    "2. 活细胞周围少于 2 个活邻居时，下一代死亡。\n"
+    "3. 活细胞周围有 2 或 3 个活邻居时，下一代继续存活。\n"
+    "4. 活细胞周围多于 3 个活邻居时，下一代死亡。\n"
+    "5. 空格周围正好有 3 个活邻居时，下一代变成活细胞。\n\n"
+    "左键修改细胞，右键拖动画布，滚轮缩放。检测到循环后会自动暂停。"
+)
 
 
 NEIGHBOR_OFFSETS = (
@@ -47,9 +56,9 @@ class LifeApp:
         self.last_painted_cell = None
         self.pan_start = None
         self.view_start = None
+        self.seen_states = {}
 
-        self.gens_per_tick = tk.IntVar(value=DEFAULT_GENERATIONS_PER_TICK)
-        self.tick_ms = tk.IntVar(value=DEFAULT_TICK_MS)
+        self.speed_multiplier = tk.IntVar(value=DEFAULT_SPEED_MULTIPLIER)
         self.status_text = tk.StringVar()
 
         self.build_ui()
@@ -76,21 +85,18 @@ class LifeApp:
         tk.Button(toolbar, text="居中", width=8, command=self.center_view).grid(row=0, column=4, padx=6)
         tk.Button(toolbar, text="保存", width=8, command=self.save_pattern).grid(row=0, column=5, padx=6)
         tk.Button(toolbar, text="载入", width=8, command=self.load_pattern).grid(row=0, column=6, padx=6)
+        tk.Button(toolbar, text="规则", width=8, command=self.show_rules).grid(row=0, column=7, padx=6)
 
-        tk.Label(toolbar, text="运算倍数", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=7, padx=(18, 4))
-        multiplier = tk.Spinbox(toolbar, from_=1, to=1000, width=6, textvariable=self.gens_per_tick)
-        multiplier.grid(row=0, column=8, padx=4)
-
-        tk.Label(toolbar, text="间隔(ms)", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=9, padx=(14, 4))
-        delay = tk.Spinbox(toolbar, from_=1, to=2000, increment=10, width=7, textvariable=self.tick_ms)
-        delay.grid(row=0, column=10, padx=4)
+        tk.Label(toolbar, text="倍速", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=8, padx=(18, 4))
+        multiplier = tk.Spinbox(toolbar, from_=1, to=200, width=6, textvariable=self.speed_multiplier)
+        multiplier.grid(row=0, column=9, padx=4)
 
         tk.Label(
             toolbar,
             text="左键画格，右键拖动画布，滚轮缩放",
             bg=PANEL_BG,
             fg="#555",
-        ).grid(row=0, column=11, padx=(18, 0), sticky="w")
+        ).grid(row=0, column=10, padx=(18, 0), sticky="w")
 
         self.canvas = tk.Canvas(self.root, bg=BACKGROUND, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -119,6 +125,13 @@ class LifeApp:
     def seed_glider(self):
         self.alive = {(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)}
         self.generation = 0
+        self.reset_history()
+
+    def show_rules(self):
+        messagebox.showinfo("生命游戏规则", RULES_TEXT)
+
+    def reset_history(self):
+        self.seen_states = {frozenset(self.alive): self.generation}
 
     def screen_to_cell(self, x, y):
         cell_x = int((x - self.offset_x) // self.cell_size)
@@ -160,6 +173,7 @@ class LifeApp:
             self.alive.add(cell)
         else:
             self.alive.discard(cell)
+        self.reset_history()
         self.redraw()
 
     def start_pan(self, event):
@@ -203,15 +217,18 @@ class LifeApp:
         if not self.running:
             return
 
-        repeats = max(1, self.gens_per_tick.get())
-        for _ in range(repeats):
-            self.advance_generation()
+        cycle = self.advance_generation()
         self.redraw()
-        self.root.after(max(1, self.tick_ms.get()), self.run_loop)
+        if self.handle_cycle(cycle):
+            return
+
+        delay = max(1, BASE_TICK_MS // max(1, self.speed_multiplier.get()))
+        self.root.after(delay, self.run_loop)
 
     def step_once(self):
-        self.advance_generation()
+        cycle = self.advance_generation()
         self.redraw()
+        self.handle_cycle(cycle)
 
     def advance_generation(self):
         neighbor_counts = defaultdict(int)
@@ -226,12 +243,35 @@ class LifeApp:
             if count == 3 or (count == 2 and cell in self.alive)
         }
         self.generation += 1
+        return self.detect_cycle()
+
+    def detect_cycle(self):
+        state = frozenset(self.alive)
+        first_seen = self.seen_states.get(state)
+        if first_seen is not None:
+            return first_seen, self.generation - first_seen
+
+        self.seen_states[state] = self.generation
+        return None
+
+    def handle_cycle(self, cycle):
+        if cycle is None:
+            return False
+
+        first_seen, period = cycle
+        self.running = False
+        self.run_button.configure(text="开始")
+        message = f"检测到循环：第 {self.generation} 代重复了第 {first_seen} 代，周期为 {period}。程序已暂停。"
+        self.status_text.set(message)
+        messagebox.showinfo("检测到循环", message)
+        return True
 
     def clear(self):
         self.running = False
         self.run_button.configure(text="开始")
         self.alive.clear()
         self.generation = 0
+        self.reset_history()
         self.redraw()
 
     def randomize_visible(self):
@@ -242,6 +282,7 @@ class LifeApp:
                 if random.random() < 0.18:
                     self.alive.add((cell_x, cell_y))
         self.generation = 0
+        self.reset_history()
         self.redraw()
 
     def save_pattern(self):
@@ -283,6 +324,7 @@ class LifeApp:
         self.run_button.configure(text="开始")
         self.alive = loaded
         self.generation = 0
+        self.reset_history()
         self.redraw()
 
     def redraw(self):
@@ -325,13 +367,14 @@ class LifeApp:
     def update_status(self):
         self.status_text.set(
             f"第 {self.generation} 代    活细胞：{len(self.alive)}    "
-            f"缩放：{self.cell_size}px/格    运算倍数：{self.gens_per_tick.get()} 代/帧"
+            f"缩放：{self.cell_size}px/格    倍速：{self.speed_multiplier.get()}x"
         )
 
 
 def main():
     root = tk.Tk()
     app = LifeApp(root)
+    root.after(300, app.show_rules)
     root.mainloop()
 
 
