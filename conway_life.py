@@ -13,9 +13,10 @@ DEFAULT_SPEED_MULTIPLIER = 1
 CYCLE_DETECTION_CELL_LIMIT = 20000
 MAX_VISIBLE_DRAW_ITEMS = 12000
 MAX_POPULATION_HISTORY = 5000
-MAX_RANDOM_COLUMNS = 120
-MAX_RANDOM_ROWS = 80
-RANDOM_DENSITY = 0.18
+DEFAULT_RANDOM_COUNT = 300
+DEFAULT_RANDOM_SPREAD = 30
+MAX_RANDOM_COUNT = 50000
+MAX_RANDOM_SPREAD = 100
 GRID_COLOR = "#d8dee9"
 LIVE_COLOR = "#1f7a4d"
 LIVE_OUTLINE = "#0f5132"
@@ -29,7 +30,7 @@ RULES_TEXT = (
     "3. 活细胞周围有 2 或 3 个活邻居时，下一代继续存活。\n"
     "4. 活细胞周围多于 3 个活邻居时，下一代死亡。\n"
     "5. 空格周围正好有 3 个活邻居时，下一代变成活细胞。\n\n"
-    "左键拖动画布，右键填充或擦除细胞，滚轮缩放。检测到循环后会自动暂停。"
+    "左键拖动画布，右键填充或擦除细胞，滚轮缩放。随机生成可自定义数量和离散程度。检测到循环后会自动暂停。"
 )
 
 
@@ -70,6 +71,8 @@ class LifeApp:
         self.stats_canvas = None
         self.stats_text = tk.StringVar()
 
+        self.random_count = tk.IntVar(value=DEFAULT_RANDOM_COUNT)
+        self.random_spread = tk.IntVar(value=DEFAULT_RANDOM_SPREAD)
         self.speed_multiplier = tk.IntVar(value=DEFAULT_SPEED_MULTIPLIER)
         self.status_text = tk.StringVar()
 
@@ -86,7 +89,7 @@ class LifeApp:
 
         toolbar = tk.Frame(self.root, bg=PANEL_BG, padx=10, pady=8)
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(12, weight=1)
+        toolbar.columnconfigure(15, weight=1)
 
         self.run_button = tk.Button(toolbar, text="开始", width=8, command=self.toggle_running)
         self.run_button.grid(row=0, column=0, padx=(0, 6))
@@ -94,22 +97,41 @@ class LifeApp:
         tk.Button(toolbar, text="单步", width=8, command=self.step_once).grid(row=0, column=1, padx=6)
         tk.Button(toolbar, text="清空", width=8, command=self.clear).grid(row=0, column=2, padx=6)
         tk.Button(toolbar, text="随机", width=8, command=self.randomize_visible).grid(row=0, column=3, padx=6)
-        tk.Button(toolbar, text="居中", width=8, command=self.center_view).grid(row=0, column=4, padx=6)
-        tk.Button(toolbar, text="保存", width=8, command=self.save_pattern).grid(row=0, column=5, padx=6)
-        tk.Button(toolbar, text="载入", width=8, command=self.load_pattern).grid(row=0, column=6, padx=6)
-        tk.Button(toolbar, text="规则", width=8, command=self.show_rules).grid(row=0, column=7, padx=6)
-        tk.Button(toolbar, text="统计", width=8, command=self.show_statistics).grid(row=0, column=8, padx=6)
+        tk.Label(toolbar, text="数量", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=4, padx=(10, 4))
+        tk.Spinbox(
+            toolbar,
+            from_=1,
+            to=MAX_RANDOM_COUNT,
+            width=8,
+            increment=50,
+            textvariable=self.random_count,
+        ).grid(row=0, column=5, padx=4)
 
-        tk.Label(toolbar, text="倍速", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=9, padx=(18, 4))
+        tk.Label(toolbar, text="离散", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=6, padx=(10, 4))
+        tk.Spinbox(
+            toolbar,
+            from_=1,
+            to=MAX_RANDOM_SPREAD,
+            width=5,
+            textvariable=self.random_spread,
+        ).grid(row=0, column=7, padx=4)
+
+        tk.Button(toolbar, text="居中", width=8, command=self.center_view).grid(row=0, column=8, padx=6)
+        tk.Button(toolbar, text="保存", width=8, command=self.save_pattern).grid(row=0, column=9, padx=6)
+        tk.Button(toolbar, text="载入", width=8, command=self.load_pattern).grid(row=0, column=10, padx=6)
+        tk.Button(toolbar, text="规则", width=8, command=self.show_rules).grid(row=0, column=11, padx=6)
+        tk.Button(toolbar, text="统计", width=8, command=self.show_statistics).grid(row=0, column=12, padx=6)
+
+        tk.Label(toolbar, text="倍速", bg=PANEL_BG, fg=TEXT_COLOR).grid(row=0, column=13, padx=(18, 4))
         multiplier = tk.Spinbox(toolbar, from_=1, to=200, width=6, textvariable=self.speed_multiplier)
-        multiplier.grid(row=0, column=10, padx=4)
+        multiplier.grid(row=0, column=14, padx=4)
 
         tk.Label(
             toolbar,
-            text="左键拖动画布，右键填充/擦除，滚轮缩放",
+            text="左键拖动画布，右键绘制/擦除，随机可调数量和离散程度",
             bg=PANEL_BG,
             fg="#555",
-        ).grid(row=0, column=11, padx=(18, 0), sticky="w")
+        ).grid(row=0, column=15, padx=(18, 0), sticky="w")
 
         self.canvas = tk.Canvas(self.root, bg=BACKGROUND, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -349,24 +371,31 @@ class LifeApp:
         self.redraw(full=False)
 
     def randomize_visible(self):
-        left, top, right, bottom = self.visible_bounds()
-        width = min(MAX_RANDOM_COLUMNS, max(1, right - left))
-        height = min(MAX_RANDOM_ROWS, max(1, bottom - top))
-        center_x = (left + right) // 2
-        center_y = (top + bottom) // 2
-        start_x = center_x - width // 2
-        start_y = center_y - height // 2
-        end_x = start_x + width
-        end_y = start_y + height
+        count = self.clamp_int_var(self.random_count, DEFAULT_RANDOM_COUNT, 1, MAX_RANDOM_COUNT)
+        spread = self.clamp_int_var(self.random_spread, DEFAULT_RANDOM_SPREAD, 1, MAX_RANDOM_SPREAD)
+        center_x, center_y = self.screen_to_cell(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2)
+        side = max(5, int((count ** 0.5) * (0.9 + spread / 8)) * 2 + 1)
+        half_span = side // 2
+        total_slots = side * side
+        count = min(count, total_slots)
 
         self.alive.clear()
-        for cell_x in range(start_x, end_x):
-            for cell_y in range(start_y, end_y):
-                if random.random() < RANDOM_DENSITY:
-                    self.alive.add((cell_x, cell_y))
+        for position in random.sample(range(total_slots), count):
+            cell_x = center_x + (position % side) - half_span
+            cell_y = center_y + (position // side) - half_span
+            self.alive.add((cell_x, cell_y))
         self.generation = 0
         self.reset_history()
         self.redraw(full=False)
+
+    def clamp_int_var(self, variable, default, minimum, maximum):
+        try:
+            value = int(variable.get())
+        except (tk.TclError, ValueError):
+            value = default
+        value = max(minimum, min(maximum, value))
+        variable.set(value)
+        return value
 
     def save_pattern(self):
         path = filedialog.asksaveasfilename(
