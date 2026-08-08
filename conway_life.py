@@ -166,17 +166,19 @@ class LifeApp:
     def show_rules(self):
         messagebox.showinfo("生命游戏规则", RULES_TEXT)
 
-    def reset_history(self):
+    def reset_history(self, record_population=True):
         if len(self.alive) > CYCLE_DETECTION_CELL_LIMIT:
             self.seen_states = {}
             self.cycle_detection_paused = True
-            self.record_population()
+            if record_population:
+                self.record_population()
             return
 
         shape, anchor = self.normalized_shape()
         self.seen_states = {shape: (self.generation, anchor)}
         self.cycle_detection_paused = False
-        self.record_population()
+        if record_population:
+            self.record_population()
 
     def normalized_shape(self):
         if not self.alive:
@@ -367,8 +369,11 @@ class LifeApp:
         self.run_button.configure(text="开始")
         self.alive.clear()
         self.generation = 0
-        self.reset_history()
+        self.population_history = []
+        self.stats_text.set("暂无数据")
+        self.reset_history(record_population=False)
         self.redraw(full=False)
+        self.redraw_statistics()
 
     def randomize_visible(self):
         count = self.clamp_int_var(self.random_count, DEFAULT_RANDOM_COUNT, 1, MAX_RANDOM_COUNT)
