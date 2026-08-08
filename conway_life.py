@@ -11,6 +11,9 @@ DEFAULT_CELL_SIZE = 18
 BASE_TICK_MS = 250
 DEFAULT_SPEED_MULTIPLIER = 1
 CYCLE_DETECTION_CELL_LIMIT = 20000
+MAX_RANDOM_COLUMNS = 120
+MAX_RANDOM_ROWS = 80
+RANDOM_DENSITY = 0.18
 GRID_COLOR = "#d8dee9"
 LIVE_COLOR = "#1f7a4d"
 LIVE_OUTLINE = "#0f5132"
@@ -24,7 +27,7 @@ RULES_TEXT = (
     "3. 活细胞周围有 2 或 3 个活邻居时，下一代继续存活。\n"
     "4. 活细胞周围多于 3 个活邻居时，下一代死亡。\n"
     "5. 空格周围正好有 3 个活邻居时，下一代变成活细胞。\n\n"
-    "左键修改细胞，右键拖动画布，滚轮缩放。检测到循环后会自动暂停。"
+    "左键拖动画布，右键填充或擦除细胞，滚轮缩放。检测到循环后会自动暂停。"
 )
 
 
@@ -95,7 +98,7 @@ class LifeApp:
 
         tk.Label(
             toolbar,
-            text="左键画格，右键拖动画布，滚轮缩放",
+            text="左键拖动画布，右键填充/擦除，滚轮缩放",
             bg=PANEL_BG,
             fg="#555",
         ).grid(row=0, column=10, padx=(18, 0), sticky="w")
@@ -108,11 +111,12 @@ class LifeApp:
 
     def bind_events(self):
         self.canvas.bind("<Configure>", lambda event: self.redraw())
-        self.canvas.bind("<Button-1>", self.start_paint)
-        self.canvas.bind("<B1-Motion>", self.drag_paint)
-        self.canvas.bind("<ButtonRelease-1>", self.stop_paint)
-        self.canvas.bind("<Button-3>", self.start_pan)
-        self.canvas.bind("<B3-Motion>", self.drag_pan)
+        self.canvas.bind("<Button-1>", self.start_pan)
+        self.canvas.bind("<B1-Motion>", self.drag_pan)
+        self.canvas.bind("<ButtonRelease-1>", self.stop_pan)
+        self.canvas.bind("<Button-3>", self.start_paint)
+        self.canvas.bind("<B3-Motion>", self.drag_paint)
+        self.canvas.bind("<ButtonRelease-3>", self.stop_paint)
         self.canvas.bind("<MouseWheel>", self.zoom_with_wheel)
         self.root.bind("<space>", lambda event: self.toggle_running())
         self.root.bind("<Return>", lambda event: self.step_once())
@@ -189,6 +193,10 @@ class LifeApp:
         self.offset_x = self.view_start[0] + event.x - self.pan_start[0]
         self.offset_y = self.view_start[1] + event.y - self.pan_start[1]
         self.redraw(full=True)
+
+    def stop_pan(self, event):
+        self.pan_start = None
+        self.view_start = None
 
     def zoom_with_wheel(self, event):
         factor = 1.15 if event.delta > 0 else 1 / 1.15
@@ -296,10 +304,19 @@ class LifeApp:
 
     def randomize_visible(self):
         left, top, right, bottom = self.visible_bounds()
+        width = min(MAX_RANDOM_COLUMNS, max(1, right - left))
+        height = min(MAX_RANDOM_ROWS, max(1, bottom - top))
+        center_x = (left + right) // 2
+        center_y = (top + bottom) // 2
+        start_x = center_x - width // 2
+        start_y = center_y - height // 2
+        end_x = start_x + width
+        end_y = start_y + height
+
         self.alive.clear()
-        for cell_x in range(left, right):
-            for cell_y in range(top, bottom):
-                if random.random() < 0.18:
+        for cell_x in range(start_x, end_x):
+            for cell_y in range(start_y, end_y):
+                if random.random() < RANDOM_DENSITY:
                     self.alive.add((cell_x, cell_y))
         self.generation = 0
         self.reset_history()
