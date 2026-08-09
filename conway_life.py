@@ -30,7 +30,8 @@ RULES_TEXT = (
     "3. 活细胞周围有 2 或 3 个活邻居时，下一代继续存活。\n"
     "4. 活细胞周围多于 3 个活邻居时，下一代死亡。\n"
     "5. 空格周围正好有 3 个活邻居时，下一代变成活细胞。\n\n"
-    "左键拖动画布，右键填充或擦除细胞，滚轮缩放。随机生成可自定义数量和离散程度。检测到循环后会自动暂停。"
+    "左键拖动画布，右键填充或擦除细胞，滚轮缩放。随机生成可自定义数量和离散程度。"
+    "勾选“循环后暂停”时，检测到循环会提示并暂停。"
 )
 
 
@@ -74,6 +75,7 @@ class LifeApp:
         self.random_count = tk.IntVar(value=DEFAULT_RANDOM_COUNT)
         self.random_spread = tk.IntVar(value=DEFAULT_RANDOM_SPREAD)
         self.speed_multiplier = tk.IntVar(value=DEFAULT_SPEED_MULTIPLIER)
+        self.stop_on_cycle = tk.BooleanVar(value=True)
         self.status_text = tk.StringVar()
 
         self.build_ui()
@@ -89,7 +91,7 @@ class LifeApp:
 
         toolbar = tk.Frame(self.root, bg=PANEL_BG, padx=10, pady=8)
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(15, weight=1)
+        toolbar.columnconfigure(16, weight=1)
 
         self.run_button = tk.Button(toolbar, text="开始", width=8, command=self.toggle_running)
         self.run_button.grid(row=0, column=0, padx=(0, 6))
@@ -126,12 +128,22 @@ class LifeApp:
         multiplier = tk.Spinbox(toolbar, from_=1, to=200, width=6, textvariable=self.speed_multiplier)
         multiplier.grid(row=0, column=14, padx=4)
 
+        tk.Checkbutton(
+            toolbar,
+            text="循环后暂停",
+            variable=self.stop_on_cycle,
+            bg=PANEL_BG,
+            fg=TEXT_COLOR,
+            activebackground=PANEL_BG,
+            selectcolor=BACKGROUND,
+        ).grid(row=0, column=15, padx=(14, 0))
+
         tk.Label(
             toolbar,
             text="左键拖动画布，右键绘制/擦除，随机可调数量和离散程度",
             bg=PANEL_BG,
             fg="#555",
-        ).grid(row=0, column=15, padx=(18, 0), sticky="w")
+        ).grid(row=0, column=16, padx=(18, 0), sticky="w")
 
         self.canvas = tk.Canvas(self.root, bg=BACKGROUND, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -351,16 +363,21 @@ class LifeApp:
             return False
 
         first_seen, period, movement_x, movement_y = cycle
-        self.running = False
-        self.run_button.configure(text="开始")
+        action_text = "程序已暂停。" if self.stop_on_cycle.get() else "程序将继续运行。"
         if movement_x or movement_y:
             message = (
                 f"检测到平移循环：第 {self.generation} 代与第 {first_seen} 代形状相同，"
-                f"周期为 {period}，每周期平移 ({movement_x}, {movement_y})。程序已暂停。"
+                f"周期为 {period}，每周期平移 ({movement_x}, {movement_y})。{action_text}"
             )
         else:
-            message = f"检测到循环：第 {self.generation} 代重复了第 {first_seen} 代，周期为 {period}。程序已暂停。"
+            message = f"检测到循环：第 {self.generation} 代重复了第 {first_seen} 代，周期为 {period}。{action_text}"
+
         self.status_text.set(message)
+        if not self.stop_on_cycle.get():
+            return False
+
+        self.running = False
+        self.run_button.configure(text="开始")
         messagebox.showinfo("检测到循环", message)
         return True
 
